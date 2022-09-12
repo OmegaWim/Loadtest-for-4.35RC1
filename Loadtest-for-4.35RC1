@@ -1,0 +1,85 @@
+import http from 'k6/http';
+import { check, group, sleep } from 'k6';
+
+// See https://k6.io/docs/using-k6/options
+export const options = {
+  stages: [
+    { duration: '10s', target: 20 },
+    { duration: '8h', target: 20 },
+    { duration: '10s', target: 0 },
+  ],
+  thresholds: {
+    http_req_failed: ['rate<0.02'], // http errors should be less than 2%
+    http_req_duration: ['p(95)<2000'], // 95% requests should be below 2s
+  },
+}
+const SLEEP_DURATION = 0.5;
+
+export default function () {
+  let baseUrl = 'https://ps.omegasys.eu';
+  let body = JSON.stringify({
+    username: 'user' + __VU,
+    password: 'Omega123',
+  });
+  const params = {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    tags: {
+      name: 'login', // first request
+    },
+  };
+
+  group('simple user journey', (_) => {
+    // Login request
+    const login_response = http.post(baseUrl + '/ps/ips/login?username=user' + __VU + '&password=Omega123', body, params);
+    check(login_response, {
+      'is session key present': (r) => r.json().hasOwnProperty('sessionKey'),
+    });
+    params.headers['session_Key'] = login_response.json()['sessionKey'];
+    let sessionKey = login_response.json()['sessionKey'];
+    //console.log(baseUrl + '/ps/ips/login?username=user' + __VU + '&password=Omega123');
+    //console.log(login_response.json());
+    //console.log('VU ', __VU, '   sessionkey ', sessionKey);
+    sleep(SLEEP_DURATION);
+
+    // Get Games
+    params.tags.name = 'get_fav_games';
+    const get_fav_games = http.get(baseUrl + '/ps/ips/getFavoriteGames?sessionKey=' + sessionKey + '&version=2', params);
+    check(get_fav_games, {
+      'get game is status 200': (r) => r.status === 200,
+    });
+    sleep(SLEEP_DURATION);
+
+    // checkchangedbalance money
+    params.tags.name = 'playergetbalance';
+    const playergetbalance = http.get(baseUrl + '/ps/ips/getBalanceSimple?brandId=11&sessionKey=' + sessionKey + '&isUpdateSession=true', params);
+    check(playergetbalance, {
+      'getbalance success': (r) => r.json()['status'] === 'SUCCESS',
+    });
+    let withdrawableBalance = (parseFloat(playergetbalance.json()['withdrawableBalance'])+1.00);
+    //console.log('VU ', __VU, '   ', playergetbalance.json())
+    sleep(SLEEP_DURATION);
+
+    // Deposit money
+    params.tags.name = 'player_desposit';
+    const player_desposit = http.get(baseUrl + '/ps/ips/processDeposit?paymentMethod=OMEGA_BANK&sessionKey=' + sessionKey + '&amount=1', params);
+    check(player_desposit, {
+      'deposit success': (r) => r.json()['status'] === 'SUCCESS',
+    });
+    if (player_desposit.json()['status'] !== 'SUCCESS')
+      console.log('VU ', __VU, '   ', player_desposit.json());
+    //console.log('VU ', __VU, '   ', player_desposit.json())
+    sleep(SLEEP_DURATION);
+
+    // checkchangedbalance money
+    params.tags.name = 'playergetchangedbalance';
+    const playergetchangedbalance = http.get(baseUrl + '/ps/ips/getBalanceSimple?brandId=11&sessionKey=' + sessionKey + '&isUpdateSession=true', params);
+    check(playergetchangedbalance, {
+      'getbalance is changed': (r) => parseFloat(r.json()['withdrawableBalance']) == (withdrawableBalance),
+    });
+    if (parseFloat(playergetchangedbalance.json()['withdrawableBalance']) != (withdrawableBalance))
+      console.log('VU ', __VU, '   ', playergetchangedbalance.json(), ' ', withdrawableBalance.toString());
+    sleep(SLEEP_DURATION);
+  });
+}
